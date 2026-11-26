@@ -17,7 +17,7 @@ from polars.exceptions import ComputeError
 
 import pylibcudf as plc
 
-from cudf_polars.containers import Column
+from cudf_polars.containers import Column, DataType
 from cudf_polars.dsl.expressions.base import ExecutionContext, Expr
 from cudf_polars.dsl.expressions.literal import Literal
 from cudf_polars.utils.sorting import nulls_at_start
@@ -25,9 +25,9 @@ from cudf_polars.utils.sorting import nulls_at_start
 if TYPE_CHECKING:
     from rmm.pylibrmm.stream import Stream
 
-    from cudf_polars.containers import DataFrame, DataType
+    from cudf_polars.containers import DataFrame
 
-__all__ = ["Agg", "Item", "Kurtosis", "Skew", "SortedAgg"]
+__all__ = ["Agg", "CoMomentAgg", "Item", "Kurtosis", "Skew", "SortedAgg"]
 
 
 class Item(Expr):
@@ -120,6 +120,58 @@ class SortedAgg(Expr):
     def agg_request(self) -> plc.aggregation.Aggregation:  # noqa: D102
         raise NotImplementedError(
             "Sorted aggregation cannot be represented as a pylibcudf "
+            "aggregation request"
+        )
+
+
+class CoMomentAgg(Expr):
+    """
+    Grouped co-moment aggregation or merge of co-moment states.
+
+    Notes
+    -----
+    Evaluated by :class:`~cudf_polars.dsl.ir.GroupBy` because computing and
+    merging co-moment states coordinates multiple pylibcudf aggregations on
+    the same grouper.
+    """
+
+    __slots__ = ("name",)
+    _non_child = ("dtype", "name")
+
+    @staticmethod
+    def state_dtype() -> DataType:
+        """Return the struct dtype storing ``(n, mx, my, m2x, m2y, cxy)``."""
+        return DataType(
+            pl.Struct(
+                [
+                    pl.Field("n", pl.Int64()),
+                    pl.Field("mx", pl.Float64()),
+                    pl.Field("my", pl.Float64()),
+                    pl.Field("m2x", pl.Float64()),
+                    pl.Field("m2y", pl.Float64()),
+                    pl.Field("cxy", pl.Float64()),
+                ]
+            )
+        )
+
+    def __init__(self, dtype: DataType, name: str, *children: Expr) -> None:
+        self.dtype = dtype
+        self.name = name
+        self.children = children
+        self.is_pointwise = False
+        if name == "comoment":
+            if len(children) != 2:
+                raise NotImplementedError("comoment expects two input expressions")
+        elif name == "merge_comoment":
+            if len(children) != 1:
+                raise NotImplementedError("merge_comoment expects one state expression")
+        else:
+            raise NotImplementedError(f"CoMoment aggregation {name=}")
+
+    @property
+    def agg_request(self) -> plc.aggregation.Aggregation:  # noqa: D102
+        raise NotImplementedError(
+            "CoMoment aggregation cannot be represented as a single pylibcudf "
             "aggregation request"
         )
 

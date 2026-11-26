@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import functools
 import itertools
 import math
 from typing import TYPE_CHECKING
@@ -18,6 +19,7 @@ from cudf_polars.dsl.expr import (
     BinOp,
     BooleanFunction,
     Cast,
+    CoMomentAgg,
     Col,
     Len,
     Literal,
@@ -58,6 +60,7 @@ _GB_AGG_SUPPORTED = (
     "n_unique",
     "std",
     "var",
+    "corr",
     "item",
     "first",
     "last",
@@ -274,6 +277,94 @@ def _decompose_std_var(
     return selection, aggregations, reductions, False
 
 
+def _decompose_corr(
+    name: str, expr: Agg, *, names: Generator[str, None, None]
+) -> tuple[NamedExpr, list[NamedExpr], list[NamedExpr], bool]:
+    """Decompose grouped Pearson correlation into mergeable co-moment states."""
+    (pair,) = expr.children
+    if not (
+        isinstance(pair, UnaryFunction) and pair.name == "as_struct"
+    ):  # pragma: no cover; translation always pairs the inputs
+        raise NotImplementedError("corr of an input other than a column pair")
+    f64 = DataType(pl.Float64())
+    i64 = DataType(pl.Int64())
+    bool_dtype = DataType(pl.Boolean())
+    op = plc.binaryop.BinaryOperator
+    state_dtype = CoMomentAgg.state_dtype()
+    state_name = f"{next(names)}__comoment"
+    state = Col(state_dtype, state_name)
+    # Partition means computed as sum/n can round differently across uneven
+    # partitions for non-binary-exact constants (e.g. 0.1), leaving tiny M2
+    # noise. Track min/max over valid pairs to detect constant inputs exactly.
+    x, y = pair.children
+    pair_valid = BinOp(
+        bool_dtype,
+        op.LOGICAL_AND,
+        BooleanFunction(bool_dtype, BooleanFunction.Name.IsNotNull, (), x),
+        BooleanFunction(bool_dtype, BooleanFunction.Name.IsNotNull, (), y),
+    )
+    (min_x, max_x, min_y, max_y), range_aggs, range_reductions, _ = combine(
+        *(
+            decompose(
+                f"{next(names)}__corr_{agg_name}",
+                Agg(
+                    f64,
+                    agg_name,
+                    False,  # noqa: FBT003
+                    ExecutionContext.GROUPBY,
+                    Ternary(
+                        f64,
+                        pair_valid,
+                        value if value.dtype == f64 else Cast(f64, False, value),  # noqa: FBT003
+                        Literal(f64, None),
+                    ),
+                ),
+                names=names,
+            )
+            for value in (x, y)
+            for agg_name in ("min", "max")
+        )
+    )
+    aggregations = [
+        NamedExpr(state_name, CoMomentAgg(state_dtype, "comoment", x, y)),
+        *range_aggs,
+    ]
+    reductions = [
+        NamedExpr(state_name, CoMomentAgg(state_dtype, "merge_comoment", state)),
+        *range_reductions,
+    ]
+    n, m2x, m2y, cxy = (
+        StructFunction(
+            i64 if field == "n" else f64,
+            StructFunction.Name.FieldByName,
+            (field,),
+            state,
+        )
+        for field in ("n", "m2x", "m2y", "cxy")
+    )
+    defined = functools.reduce(
+        lambda left, right: BinOp(bool_dtype, op.LOGICAL_AND, left, right),
+        (
+            BinOp(bool_dtype, op.GREATER_EQUAL, n, Literal(i64, 2)),
+            BinOp(bool_dtype, op.GREATER, m2x, Literal(f64, 0.0)),
+            BinOp(bool_dtype, op.GREATER, m2y, Literal(f64, 0.0)),
+            BinOp(bool_dtype, op.NOT_EQUAL, min_x.value, max_x.value),
+            BinOp(bool_dtype, op.NOT_EQUAL, min_y.value, max_y.value),
+        ),
+    )
+    # Divide by each square root in turn so their product cannot overflow.
+    r = BinOp(
+        f64,
+        op.DIV,
+        BinOp(f64, op.DIV, cxy, UnaryFunction(f64, "sqrt", (), m2x)),
+        UnaryFunction(f64, "sqrt", (), m2y),
+    )
+    selection = NamedExpr(
+        name, Ternary(expr.dtype, defined, r, Literal(expr.dtype, None))
+    )
+    return selection, aggregations, reductions, False
+
+
 def _decompose_sorted_agg(
     name: str, expr: SortedAgg, *, names: Generator[str, None, None]
 ) -> tuple[NamedExpr, list[NamedExpr], list[NamedExpr], bool]:
@@ -432,6 +523,8 @@ def decompose(
             return selection, aggregations, reductions, need_preshuffle
         elif expr.name in {"std", "var"}:
             return _decompose_std_var(name, expr, names=names)
+        elif expr.name == "corr":
+            return _decompose_corr(name, expr, names=names)
         else:
             raise NotImplementedError(
                 "group_by does not support multiple partitions "

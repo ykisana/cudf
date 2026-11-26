@@ -621,6 +621,102 @@ def test_groupby_std_var_ddof(df, engine, agg, ddof):
     )
 
 
+@pytest.mark.parametrize(
+    "left_dtype,right_dtype",
+    [
+        (pl.Int32, pl.Int32),
+        (pl.Float32, pl.Float32),
+        (pl.Float64, pl.Float64),
+        (pl.Int32, pl.Float32),
+    ],
+)
+def test_groupby_corr_streaming(
+    streaming_engine_factory,
+    left_dtype: pl.DataType,
+    right_dtype: pl.DataType,
+) -> None:
+    engine = streaming_engine_factory(
+        StreamingOptions(
+            max_rows_per_partition=4,
+            fallback_mode="raise",
+        ),
+    )
+    # Groups cover: multi-partition correlation with one-sided nulls (1),
+    # constant column -> NaN (2), single valid pair -> NaN (3),
+    # zero valid pairs across partitions -> NaN (4), empty partition for group (5).
+    df = pl.LazyFrame(
+        {
+            "key": [1, 1, 2, 3, 1, 2, 4, 4, 1, 1, 2, 5, 5, 5, 5, 1],
+            "left": pl.Series(
+                [1, None, 5, 1, 3, 5, None, 2, 4, 6, 5, 2, 4, 6, 8, 9],
+                dtype=left_dtype,
+            ),
+            "right": pl.Series(
+                [2, 4, 1, 2, 1, 7, 1, None, 5, 8, 9, 4, 6, 2, 0, 10],
+                dtype=right_dtype,
+            ),
+        }
+    )
+    q = df.group_by("key").agg(pl.corr("left", "right")).sort("key")
+    assert_gpu_result_equal(q, engine=engine, check_exact=False)
+
+
+def test_groupby_corr_streaming_combined_and_edges(streaming_engine_factory) -> None:
+    engine = streaming_engine_factory(
+        StreamingOptions(
+            max_rows_per_partition=4,
+            fallback_mode="raise",
+        ),
+    )
+    offset = 1e9
+    df = pl.LazyFrame(
+        {
+            "key": [1, 2, 1, 2, 3, 1, 2, 3, 1, 2, 3, 3],
+            "x": [
+                offset + 1.0,
+                1.0,
+                offset + 2.0,
+                2.0,
+                float("nan"),
+                offset + 4.0,
+                3.0,
+                1.0,
+                offset + 5.0,
+                4.0,
+                2.0,
+                3.0,
+            ],
+            "y": [2.0, 10.0, 5.0, 8.0, 1.0, 7.0, 6.0, 2.0, 11.0, 3.0, 3.0, 4.0],
+            "z": [1.0, 3.0, 2.0, 2.0, 5.0, 4.0, 1.0, 6.0, 5.0, 0.0, 7.0, 8.0],
+        }
+    )
+    q = df.group_by("key", maintain_order=True).agg(
+        pl.corr("x", "y").alias("c_xy"),
+        pl.corr("y", "z").alias("c_yz"),
+        pl.col("y").sum().alias("s_y"),
+        pl.col("z").std().alias("sd_z"),
+    )
+    assert_gpu_result_equal(q, engine=engine, check_exact=False, rtol=1e-6)
+    assert_gpu_result_equal(
+        df.head(0).group_by("key").agg(pl.corr("x", "y")), engine=engine
+    )
+    # Non-binary-exact constant (0.1) across uneven partitions must stay NaN
+    # (CPU Polars itself can return finite rounding noise, so assert is_nan directly).
+    const_df = pl.LazyFrame(
+        {
+            "key": [0] * 3 + [1] * 7 + [0] * 11 + [1] * 5,
+            "x": [0.1] * 26,
+            "y": [float(i % 7) for i in range(26)],
+        }
+    )
+    const_res = (
+        const_df.group_by("key")
+        .agg(pl.corr("x", "y").alias("r"))
+        .collect(engine=engine)
+    )
+    assert const_res["r"].is_nan().all()
+
+
 @pytest.mark.parametrize("fallback_mode", ["silent", "raise", "warn", "foo"])
 def test_groupby_fallback(df, fallback_mode, spmd_engine_factory):
     streaming_engine = spmd_engine_factory(
