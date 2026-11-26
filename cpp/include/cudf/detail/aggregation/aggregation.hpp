@@ -728,6 +728,24 @@ class correlation_aggregation final
 };
 
 /**
+ * @brief Derived aggregation class for specifying COMOMENT aggregation
+ */
+class comoment_aggregation final
+  : public clonable<comoment_aggregation>::derived_from<groupby_aggregation> {
+ public:
+  explicit comoment_aggregation() : aggregation{COMOMENT} {}
+};
+
+/**
+ * @brief Derived aggregation class for specifying MERGE_COMOMENT aggregation
+ */
+class merge_comoment_aggregation final
+  : public clonable<merge_comoment_aggregation>::derived_from<groupby_aggregation> {
+ public:
+  explicit merge_comoment_aggregation() : aggregation{MERGE_COMOMENT} {}
+};
+
+/**
  * @brief Derived aggregation class for specifying TDIGEST aggregation
  */
 class tdigest_aggregation final
@@ -1073,6 +1091,17 @@ struct target_type_impl<SourceType, aggregation::CORRELATION> {
   using type = double;
 };
 
+// COMOMENT and MERGE_COMOMENT take and produce a struct column
+template <cudf::concepts::struct_view Source>
+struct target_type_impl<Source, aggregation::COMOMENT> {
+  using type = struct_view;
+};
+
+template <cudf::concepts::struct_view Source>
+struct target_type_impl<Source, aggregation::MERGE_COMOMENT> {
+  using type = struct_view;
+};
+
 // Always use numeric types for TDIGEST
 template <typename Source>
   requires(cudf::concepts::arithmetic<Source> or cudf::concepts::fixed_point<Source>)
@@ -1199,6 +1228,10 @@ CUDF_HOST_DEVICE inline decltype(auto) aggregation_dispatcher(aggregation::Kind 
       return f.template operator()<aggregation::COVARIANCE>(std::forward<Ts>(args)...);
     case aggregation::CORRELATION:
       return f.template operator()<aggregation::CORRELATION>(std::forward<Ts>(args)...);
+    case aggregation::COMOMENT:
+      return f.template operator()<aggregation::COMOMENT>(std::forward<Ts>(args)...);
+    case aggregation::MERGE_COMOMENT:
+      return f.template operator()<aggregation::MERGE_COMOMENT>(std::forward<Ts>(args)...);
     case aggregation::TDIGEST:
       return f.template operator()<aggregation::TDIGEST>(std::forward<Ts>(args)...);
     case aggregation::MERGE_TDIGEST:

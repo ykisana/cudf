@@ -60,6 +60,8 @@ cdef extern from "cudf/aggregation.hpp" namespace "cudf" nogil:
         HISTOGRAM
         MERGE_HISTOGRAM
         BITWISE_AGG
+        COMOMENT
+        MERGE_COMOMENT
 
     cdef cppclass aggregation:
         Kind kind
@@ -203,6 +205,10 @@ cdef extern from "cudf/aggregation.hpp" namespace "cudf" nogil:
     cdef unique_ptr[T] make_merge_m2_aggregation[T]() except +libcudf_exception_handler
 
     cdef unique_ptr[T] make_m2_aggregation[T]() except +libcudf_exception_handler
+
+    cdef unique_ptr[T] make_comoment_aggregation[T]() except +libcudf_exception_handler
+
+    cdef unique_ptr[T] make_merge_comoment_aggregation[T]() except +libcudf_exception_handler
 
     cdef unique_ptr[T] make_bitwise_aggregation[T](
         bitwise_op op

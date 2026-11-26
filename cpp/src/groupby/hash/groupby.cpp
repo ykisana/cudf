@@ -74,7 +74,9 @@ bool needs_stable_groups(aggregation::Kind kind)
     case aggregation::NUNIQUE:
     case aggregation::TDIGEST:
     case aggregation::COVARIANCE:
-    case aggregation::CORRELATION: return false;
+    case aggregation::CORRELATION:
+    case aggregation::COMOMENT:
+    case aggregation::MERGE_COMOMENT: return false;
     default: return true;
   }
 }
@@ -587,6 +589,26 @@ void aggregate_result_functor::operator()<aggregation::CORRELATION>(aggregation 
     values,
     agg,
     detail::group_correlation(covariance, stddev0, stddev1, stream, mr.get_output_mr()));
+}
+
+template <>
+void aggregate_result_functor::operator()<aggregation::COMOMENT>(aggregation const& agg)
+{
+  if (cache.has_result(values, agg)) { return; }
+
+  cache.add_result(
+    values, agg, detail::group_comoment(values, helper.reduction_groups(stream, mr), stream, mr));
+}
+
+template <>
+void aggregate_result_functor::operator()<aggregation::MERGE_COMOMENT>(aggregation const& agg)
+{
+  if (cache.has_result(values, agg)) { return; }
+
+  cache.add_result(
+    values,
+    agg,
+    detail::group_merge_comoment(values, helper.reduction_groups(stream, mr), stream, mr));
 }
 
 /**

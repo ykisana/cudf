@@ -330,6 +330,36 @@ std::unique_ptr<column> group_correlation(column_view const& covariance,
                                           cudf::memory_resources mr);
 
 /**
+ * @brief Internal API to compute grouped co-moment statistics over a 2-child structs column.
+ *
+ * @param values Ungrouped structs column with 2 numeric (or dictionary of numeric) children `(x,
+ * y)`
+ * @param grouped The input rows grouped by key with their reduction schedule
+ * @param stream CUDA stream used for device memory operations and kernel launches
+ * @param mr Memory resources for temporary allocations and the returned column
+ * @return Non-nullable structs column with 6 children `(count, mean_x, mean_y, m2_x, m2_y, c_xy)`
+ */
+std::unique_ptr<column> group_comoment(column_view const& values,
+                                       hash::grouped_rows const& grouped,
+                                       cuda::stream_ref stream,
+                                       cudf::memory_resources mr);
+
+/**
+ * @brief Internal API to merge grouped partial co-moment states corresponding to the same key.
+ *
+ * @param values Ungrouped structs column with 6 children `(count, mean_x, mean_y, m2_x, m2_y,
+ * c_xy)`
+ * @param grouped The input rows grouped by key with their reduction schedule
+ * @param stream CUDA stream used for device memory operations and kernel launches
+ * @param mr Memory resources for temporary allocations and the returned column
+ * @return Non-nullable structs column with the merged 6-child co-moment states
+ */
+std::unique_ptr<column> group_merge_comoment(column_view const& values,
+                                             hash::grouped_rows const& grouped,
+                                             cuda::stream_ref stream,
+                                             cudf::memory_resources mr);
+
+/**
  * @brief Internal API to calculate bitwise operation on grouped values ignoring nulls.
  *
  * @param bit_op Bitwise operation to perform on the input

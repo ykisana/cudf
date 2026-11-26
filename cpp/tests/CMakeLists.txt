@@ -146,6 +146,7 @@ ConfigureTest(
   groupby/bitwise_tests.cpp
   groupby/collect_list_tests.cpp
   groupby/collect_set_tests.cpp
+  groupby/comoment_tests.cpp
   groupby/correlation_tests.cpp
   groupby/count_scan_tests.cpp
   groupby/count_tests.cpp

@@ -728,6 +728,7 @@ add_library(
   src/groupby/hash/extract_single_pass_aggs.cpp
   src/groupby/hash/group_bitwise.cu
   src/groupby/hash/group_collect.cu
+  src/groupby/hash/group_comoment.cu
   src/groupby/hash/group_correlation.cu
   src/groupby/hash/group_count_scan.cu
   src/groupby/hash/group_histogram.cu
