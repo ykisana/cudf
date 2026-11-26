@@ -244,6 +244,14 @@ class _SortedAggRequest:
     value: expr.SortedAgg
 
 
+@dataclass(frozen=True)
+class _CoMomentRequest:
+    """Named co-moment aggregation request."""
+
+    name: str
+    value: expr.CoMomentAgg
+
+
 def apply_predicate(df: DataFrame, predicate: expr.NamedExpr | None) -> DataFrame:
     """Filter ``df`` by a predicate expression."""
     if predicate is None:
@@ -2605,6 +2613,108 @@ def _has_struct_in_list(polars_type: pl.DataType) -> bool:
     return isinstance(current, pl.Struct)
 
 
+def _struct_column(children: Sequence[plc.Column]) -> plc.Column:
+    """Build a non-nullable struct column from equal-length offset-0 children."""
+    return plc.Column(
+        data_type=plc.DataType(plc.TypeId.STRUCT),
+        size=children[0].size(),
+        data=None,
+        mask=None,
+        null_count=0,
+        offset=0,
+        children=list(children),
+    )
+
+
+def _comoment_state(
+    name: str,
+    dtype: DataType,
+    n: plc.Column,
+    moments: Sequence[plc.Column],
+    stream: Stream,
+) -> Column:
+    """Pack a co-moment state whose moments are null iff ``n == 0``."""
+    nonempty = plc.binaryop.binary_operation(
+        n,
+        plc.Scalar.from_py(0, n.type(), stream=stream),
+        plc.binaryop.BinaryOperator.GREATER,
+        plc.DataType(plc.TypeId.BOOL8),
+        stream=stream,
+    )
+    mask, null_count = plc.transform.bools_to_mask(nonempty, stream=stream)
+    valid = mask if null_count else None
+    return Column(
+        _struct_column([n, *(m.with_mask(valid, null_count) for m in moments)]),
+        name=name,
+        dtype=dtype,
+    )
+
+
+def _group_index_map(
+    keys: Sequence[Column], group_keys: plc.Table, stream: Stream
+) -> plc.Column:
+    """Return the group index in ``group_keys`` for each row of ``keys``."""
+    rows, groups = plc.join.left_join(
+        plc.Table([k.obj for k in keys]),
+        group_keys,
+        plc.types.NullEquality.EQUAL,
+        stream=stream,
+    )
+    target = plc.Column.from_scalar(
+        plc.Scalar.from_py(None, plc.types.SIZE_TYPE, stream=stream),
+        keys[0].size,
+        stream=stream,
+    )
+    (index,) = plc.copying.scatter(
+        plc.Table([groups]), rows, plc.Table([target]), stream=stream
+    ).columns()
+    return index
+
+
+def _gather_groups(
+    columns: Sequence[plc.Column], group_index: plc.Column, stream: Stream
+) -> tuple[plc.Column, ...]:
+    """Broadcast per-group columns back onto input rows via ``group_index``."""
+    return plc.copying.gather(
+        plc.Table(list(columns)),
+        group_index,
+        plc.copying.OutOfBoundsPolicy.NULLIFY,
+        stream=stream,
+    ).columns()
+
+
+def _comoment_adjusted_sum_requests(
+    weight: plc.Column,
+    dx: plc.Column,
+    shift_x: plc.Column,
+    dy: plc.Column,
+    shift_y: plc.Column,
+    m2x: plc.Column,
+    m2y: plc.Column,
+    cxy: plc.Column,
+    stream: Stream,
+) -> list[plc.groupby.GroupByRequest]:
+    """Build groupby sum requests for shifted M2 and co-moment terms."""
+    op = plc_expr.Operation
+    ast = plc_expr.ASTOperator
+    col = plc_expr.ColumnReference
+    table = plc.Table([weight, dx, shift_x, dy, shift_y, m2x, m2y, cxy])
+    dev_x = op(ast.SUB, col(1), col(2))
+    dev_y = op(ast.SUB, col(3), col(4))
+    terms = (
+        op(ast.ADD, col(5), op(ast.MUL, col(0), op(ast.MUL, dev_x, dev_x))),
+        op(ast.ADD, col(6), op(ast.MUL, col(0), op(ast.MUL, dev_y, dev_y))),
+        op(ast.ADD, col(7), op(ast.MUL, col(0), op(ast.MUL, dev_x, dev_y))),
+    )
+    return [
+        plc.groupby.GroupByRequest(
+            plc.transform.compute_column(table, term, stream=stream),
+            [plc.aggregation.sum()],
+        )
+        for term in terms
+    ]
+
+
 class GroupBy(IR):
     """Perform a groupby."""
 
@@ -2696,15 +2806,25 @@ class GroupBy(IR):
         )
         requests: list[expr.NamedExpr] = []
         sorted_requests: list[_SortedAggRequest] = []
+        comoment_requests: list[_CoMomentRequest] = []
         for request in agg_requests:
             value = request.value
             if isinstance(value, expr.SortedAgg):
                 sorted_requests.append(_SortedAggRequest(request.name, value))
+            elif isinstance(value, expr.CoMomentAgg):
+                comoment_requests.append(_CoMomentRequest(request.name, value))
             else:
                 requests.append(request)
-        group_keys, results = cls._evaluate_aggregation_requests(
+        # Run co-moment aggregations first so the grouper establishes row-level
+        # groups before any counts-only request, keeping group_keys aligned.
+        group_keys, comoment_results = cls._evaluate_comoment_aggregations(
+            comoment_requests, keys, grouper, df
+        )
+        ordinary_group_keys, results = cls._evaluate_aggregation_requests(
             schema, keys, grouper, requests, df
         )
+        if group_keys is None:
+            group_keys = ordinary_group_keys
         group_keys, sorted_results = cls._evaluate_sorted_aggregations(
             sorted_requests, keys, df, target_group_keys=group_keys
         )
@@ -2717,6 +2837,10 @@ class GroupBy(IR):
         results_by_name.update(
             (request.name, result)
             for request, result in zip(sorted_requests, sorted_results, strict=True)
+        )
+        results_by_name.update(
+            (request.name, result)
+            for request, result in zip(comoment_requests, comoment_results, strict=True)
         )
         results = [results_by_name[request.name] for request in agg_requests]
         result_keys = [
@@ -2992,6 +3116,209 @@ class GroupBy(IR):
 
         return common_group_keys, [
             results_by_name[request.name] for request in sorted_requests
+        ]
+
+    @classmethod
+    def _evaluate_comoment_aggregations(
+        cls,
+        comoment_requests: Sequence[_CoMomentRequest],
+        keys: Sequence[Column],
+        grouper: plc.groupby.GroupBy,
+        df: DataFrame,
+    ) -> tuple[plc.Table | None, list[Column]]:
+        """Evaluate grouped co-moment states and merges of them."""
+        group_keys: plc.Table | None = None
+        results_by_name: dict[str, Column] = {}
+        states = [r for r in comoment_requests if r.value.name == "comoment"]
+        merges = [r for r in comoment_requests if r.value.name == "merge_comoment"]
+        if states:
+            group_keys, results = cls._evaluate_comoment_states(
+                states, keys, grouper, df
+            )
+            results_by_name.update(
+                (r.name, result) for r, result in zip(states, results, strict=True)
+            )
+        if merges:
+            group_keys, results = cls._merge_comoment_states(merges, keys, grouper, df)
+            results_by_name.update(
+                (r.name, result) for r, result in zip(merges, results, strict=True)
+            )
+        return group_keys, [results_by_name[r.name] for r in comoment_requests]
+
+    @staticmethod
+    def _evaluate_comoment_states(
+        requests: Sequence[_CoMomentRequest],
+        keys: Sequence[Column],
+        grouper: plc.groupby.GroupBy,
+        df: DataFrame,
+    ) -> tuple[plc.Table, list[Column]]:
+        """Compute per-group co-moment states over rows where both inputs are valid."""
+        stream = df.stream
+        f64 = plc.DataType(plc.TypeId.FLOAT64)
+        i64 = plc.DataType(plc.TypeId.INT64)
+        aggregations: list[plc.groupby.GroupByRequest] = []
+        for request in requests:
+            # Cast produces offset-0 buffers, which bitmask_and and _struct_column need.
+            x, y = (
+                plc.unary.cast(column.obj, f64, stream=stream)
+                for column in broadcast(
+                    *(
+                        child.evaluate(df, context=ExecutionContext.GROUPBY)
+                        for child in request.value.children
+                    ),
+                    target_length=keys[0].size,
+                    stream=stream,
+                )
+            )
+            mask, null_count = plc.null_mask.bitmask_and([x, y], stream=stream)
+            valid = mask if null_count else None
+            x, y = x.with_mask(valid, null_count), y.with_mask(valid, null_count)
+            aggregations.extend(
+                (
+                    plc.groupby.GroupByRequest(
+                        x,
+                        [
+                            plc.aggregation.count(plc.types.NullPolicy.EXCLUDE),
+                            plc.aggregation.mean(),
+                            plc.aggregation.m2(),
+                        ],
+                    ),
+                    plc.groupby.GroupByRequest(
+                        y, [plc.aggregation.mean(), plc.aggregation.m2()]
+                    ),
+                    plc.groupby.GroupByRequest(
+                        _struct_column([x, y]), [plc.aggregation.covariance(1, 0)]
+                    ),
+                )
+            )
+        group_keys, tables = grouper.aggregate(aggregations, stream=stream)
+        results = []
+        for request, x_table, y_table, xy_table in zip(
+            requests, tables[0::3], tables[1::3], tables[2::3], strict=True
+        ):
+            count, mx, m2x = x_table.columns()
+            my, m2y = y_table.columns()
+            (cov,) = xy_table.columns()
+            n = plc.unary.cast(count, i64, stream=stream)
+            cxy = plc.binaryop.binary_operation(
+                cov, n, plc.binaryop.BinaryOperator.MUL, f64, stream=stream
+            )
+            results.append(
+                _comoment_state(
+                    request.name,
+                    request.value.dtype,
+                    n,
+                    [mx, my, m2x, m2y, cxy],
+                    stream,
+                )
+            )
+        return group_keys, results
+
+    @staticmethod
+    def _merge_comoment_states(
+        requests: Sequence[_CoMomentRequest],
+        keys: Sequence[Column],
+        grouper: plc.groupby.GroupBy,
+        df: DataFrame,
+    ) -> tuple[plc.Table, list[Column]]:
+        """
+        Merge co-moment states via shifted law-of-total-covariance sums.
+
+        Shifting each partial mean relative to the first valid partial mean of
+        its group avoids catastrophic cancellation and weighted-sum overflow
+        when values sit far from zero.
+        """
+        stream = df.stream
+        f64 = plc.DataType(plc.TypeId.FLOAT64)
+        op = plc.binaryop.BinaryOperator
+        states = []
+        for request in requests:
+            (child,) = request.value.children
+            col = child.evaluate(df, context=ExecutionContext.GROUPBY).obj
+            view = col.struct_view()
+            states.append([view.get_sliced_child(i, stream=stream) for i in range(6)])
+        # Pass 1: reference means (first valid partial mean per group).
+        group_keys, tables = grouper.aggregate(
+            [
+                plc.groupby.GroupByRequest(
+                    mean,
+                    [plc.aggregation.nth_element(0, plc.types.NullPolicy.EXCLUDE)],
+                )
+                for _, mx, my, *_ in states
+                for mean in (mx, my)
+            ],
+            stream=stream,
+        )
+        refs = [t.columns()[0] for t in tables]
+        group_index = _group_index_map(keys, group_keys, stream)
+        row_refs = _gather_groups(refs, group_index, stream)
+        # Pass 2: total counts and shifted mean offsets.
+        aggregations: list[plc.groupby.GroupByRequest] = []
+        offsets = []
+        for (n, mx, my, *_), ref_x, ref_y in zip(
+            states, row_refs[0::2], row_refs[1::2], strict=True
+        ):
+            weight = plc.unary.cast(n, f64, stream=stream)
+            dx = plc.binaryop.binary_operation(mx, ref_x, op.SUB, f64, stream=stream)
+            dy = plc.binaryop.binary_operation(my, ref_y, op.SUB, f64, stream=stream)
+            offsets.append((weight, dx, dy))
+            aggregations.extend(
+                plc.groupby.GroupByRequest(col, [plc.aggregation.sum()])
+                for col in (
+                    n,
+                    plc.binaryop.binary_operation(
+                        weight, dx, op.MUL, f64, stream=stream
+                    ),
+                    plc.binaryop.binary_operation(
+                        weight, dy, op.MUL, f64, stream=stream
+                    ),
+                )
+            )
+        _, tables = grouper.aggregate(aggregations, stream=stream)
+        sums = [t.columns()[0] for t in tables]
+        counts = sums[0::3]
+        shifts = [
+            plc.binaryop.binary_operation(total, count, op.DIV, f64, stream=stream)
+            for count, total_x, total_y in zip(
+                counts, sums[1::3], sums[2::3], strict=True
+            )
+            for total in (total_x, total_y)
+        ]
+        # Pass 3: merged M2s and co-moment from shifted deviations.
+        row_shifts = _gather_groups(shifts, group_index, stream)
+        aggregations = [
+            req
+            for (*_, m2x, m2y, cxy), (weight, dx, dy), shift_x, shift_y in zip(
+                states, offsets, row_shifts[0::2], row_shifts[1::2], strict=True
+            )
+            for req in _comoment_adjusted_sum_requests(
+                weight, dx, shift_x, dy, shift_y, m2x, m2y, cxy, stream
+            )
+        ]
+        _, tables = grouper.aggregate(aggregations, stream=stream)
+        sums = [t.columns()[0] for t in tables]
+        means = [
+            plc.binaryop.binary_operation(ref, shift, op.ADD, f64, stream=stream)
+            for ref, shift in zip(refs, shifts, strict=True)
+        ]
+        return group_keys, [
+            _comoment_state(
+                request.name,
+                request.value.dtype,
+                count,
+                [mean_x, mean_y, m2x, m2y, cxy],
+                stream,
+            )
+            for request, count, mean_x, mean_y, m2x, m2y, cxy in zip(
+                requests,
+                counts,
+                means[0::2],
+                means[1::2],
+                sums[0::3],
+                sums[1::3],
+                sums[2::3],
+                strict=True,
+            )
         ]
 
 

@@ -13,7 +13,14 @@ In particular, the interpretation of the expression language in a
 
 from __future__ import annotations
 
-from cudf_polars.dsl.expressions.aggregation import Agg, Item, Kurtosis, Skew, SortedAgg
+from cudf_polars.dsl.expressions.aggregation import (
+    Agg,
+    CoMomentAgg,
+    Item,
+    Kurtosis,
+    Skew,
+    SortedAgg,
+)
 from cudf_polars.dsl.expressions.base import (
     Col,
     ColRef,
@@ -46,6 +53,7 @@ __all__ = [
     "BitwiseFunction",
     "BooleanFunction",
     "Cast",
+    "CoMomentAgg",
     "Col",
     "ColRef",
     "ErrorExpr",
