@@ -58,6 +58,7 @@ _GB_AGG_SUPPORTED = (
     "n_unique",
     "std",
     "var",
+    "corr",
     "item",
     "first",
     "last",
@@ -274,6 +275,74 @@ def _decompose_std_var(
     return selection, aggregations, reductions, False
 
 
+def _decompose_corr(
+    name: str, expr: Agg, *, names: Generator[str, None, None]
+) -> tuple[NamedExpr, list[NamedExpr], list[NamedExpr], bool]:
+    """Decompose grouped Pearson correlation into single-pass co-moment states."""
+    (pair,) = expr.children
+    f64 = DataType(pl.Float64())
+    i64 = DataType(pl.Int64())
+    bool_dtype = DataType(pl.Boolean())
+    state_dtype = DataType(
+        pl.Struct(
+            [
+                pl.Field("n", pl.Int64()),
+                pl.Field("mx", pl.Float64()),
+                pl.Field("my", pl.Float64()),
+                pl.Field("m2x", pl.Float64()),
+                pl.Field("m2y", pl.Float64()),
+                pl.Field("cxy", pl.Float64()),
+            ]
+        )
+    )
+    state_name = f"{next(names)}__comoment"
+    state = Col(state_dtype, state_name)
+    aggregations = [
+        NamedExpr(
+            state_name,
+            Agg(state_dtype, "comoment", None, ExecutionContext.GROUPBY, pair),
+        )
+    ]
+    reductions = [
+        NamedExpr(
+            state_name,
+            Agg(state_dtype, "merge_comoment", None, ExecutionContext.GROUPBY, state),
+        )
+    ]
+    n, m2x, m2y, cxy = (
+        StructFunction(
+            i64 if field == "n" else f64,
+            StructFunction.Name.FieldByName,
+            (field,),
+            state,
+        )
+        for field in ("n", "m2x", "m2y", "cxy")
+    )
+    op = plc.binaryop.BinaryOperator
+    defined = BinOp(
+        bool_dtype,
+        op.LOGICAL_AND,
+        BinOp(
+            bool_dtype,
+            op.LOGICAL_AND,
+            BinOp(bool_dtype, op.GREATER_EQUAL, n, Literal(i64, 2)),
+            BinOp(bool_dtype, op.GREATER, m2x, Literal(f64, 0.0)),
+        ),
+        BinOp(bool_dtype, op.GREATER, m2y, Literal(f64, 0.0)),
+    )
+    # Divide by each square root in turn so their product cannot overflow.
+    r = BinOp(
+        f64,
+        op.DIV,
+        BinOp(f64, op.DIV, cxy, UnaryFunction(f64, "sqrt", (), m2x)),
+        UnaryFunction(f64, "sqrt", (), m2y),
+    )
+    selection = NamedExpr(
+        name, Ternary(expr.dtype, defined, r, Literal(expr.dtype, None))
+    )
+    return selection, aggregations, reductions, False
+
+
 def _decompose_sorted_agg(
     name: str, expr: SortedAgg, *, names: Generator[str, None, None]
 ) -> tuple[NamedExpr, list[NamedExpr], list[NamedExpr], bool]:
@@ -432,6 +501,8 @@ def decompose(
             return selection, aggregations, reductions, need_preshuffle
         elif expr.name in {"std", "var"}:
             return _decompose_std_var(name, expr, names=names)
+        elif expr.name == "corr":
+            return _decompose_corr(name, expr, names=names)
         else:
             raise NotImplementedError(
                 "group_by does not support multiple partitions "

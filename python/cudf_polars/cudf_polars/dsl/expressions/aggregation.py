@@ -203,6 +203,14 @@ class Agg(Expr):
             name == "merge_m2"
         ):  # pragma: no cover; doesn't have a direct polars equivalent
             req = plc.aggregation.merge_m2()
+        elif (
+            name == "comoment"
+        ):  # pragma: no cover; doesn't have a direct polars equivalent
+            req = plc.aggregation.comoment()
+        elif (
+            name == "merge_comoment"
+        ):  # pragma: no cover; doesn't have a direct polars equivalent
+            req = plc.aggregation.merge_comoment()
         elif name == "quantile":
             child, quantile = self.children
             if not isinstance(quantile, Literal):
@@ -260,6 +268,8 @@ class Agg(Expr):
             "mean",
             "m2",
             "merge_m2",
+            "comoment",
+            "merge_comoment",
             "sum",
             "product",
             "count",

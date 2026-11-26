@@ -118,6 +118,8 @@ class aggregation {
     MERGE_HISTOGRAM,  ///< merge partial values of HISTOGRAM aggregation
     BITWISE_AGG,      ///< bitwise aggregation on numeric columns
     TOP_K,            ///< top k elements in a group
+    COMOMENT,         ///< compute co-moment statistics between two sets of elements
+    MERGE_COMOMENT,   ///< merge partial values of COMOMENT aggregation
     INVALID           ///< invalid aggregation, used as a placeholder when default-constructed
   };
 
@@ -649,6 +651,37 @@ std::unique_ptr<Base> make_covariance_aggregation(size_type min_periods = 1, siz
 template <typename Base = aggregation>
 std::unique_ptr<Base> make_correlation_aggregation(correlation_type type,
                                                    size_type min_periods = 1);
+
+/**
+ * @brief Factory to create a COMOMENT aggregation
+ *
+ * Computes mergeable second-order co-moment statistics between two numeric columns packed as the
+ * two children `(x, y)` of a structs column, ignoring rows where the struct or either child is
+ * null.
+ *
+ * The output is a non-nullable structs column with 6 children:
+ * `(count, mean_x, mean_y, m2_x, m2_y, c_xy)` of types
+ * `(INT64, FLOAT64, FLOAT64, FLOAT64, FLOAT64, FLOAT64)`, where `m2_x = SUM((x - mean_x)^2)`,
+ * `m2_y = SUM((y - mean_y)^2)`, and `c_xy = SUM((x - mean_x) * (y - mean_y))`. Groups with no
+ * valid pairs produce all zeros.
+ *
+ * @return A COMOMENT aggregation object
+ */
+template <typename Base = aggregation>
+std::unique_ptr<Base> make_comoment_aggregation();
+
+/**
+ * @brief Factory to create a MERGE_COMOMENT aggregation
+ *
+ * Merges partial `COMOMENT` results across independent partitions into a single co-moment state
+ * equivalent to computing `COMOMENT` over the union of partitions. The input must be a structs
+ * column with 6 children `(count, mean_x, mean_y, m2_x, m2_y, c_xy)`, where `count` is `INT64` or
+ * `FLOAT64` and the remaining 5 children are `FLOAT64`. The output has the same struct layout.
+ *
+ * @return A MERGE_COMOMENT aggregation object
+ */
+template <typename Base = aggregation>
+std::unique_ptr<Base> make_merge_comoment_aggregation();
 
 /**
  * @brief Factory to create a TDIGEST aggregation

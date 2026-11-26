@@ -22,6 +22,7 @@ from pylibcudf.libcudf.aggregation cimport (
     make_bitwise_aggregation,
     make_collect_list_aggregation,
     make_collect_set_aggregation,
+    make_comoment_aggregation,
     make_correlation_aggregation,
     make_count_aggregation,
     make_covariance_aggregation,
@@ -33,6 +34,7 @@ from pylibcudf.libcudf.aggregation cimport (
     make_max_aggregation,
     make_mean_aggregation,
     make_median_aggregation,
+    make_merge_comoment_aggregation,
     make_merge_m2_aggregation,
     make_merge_histogram_aggregation,
     make_merge_lists_aggregation,
@@ -95,6 +97,7 @@ __all__ = [
     "bitwise",
     "collect_list",
     "collect_set",
+    "comoment",
     "correlation",
     "count",
     "covariance",
@@ -107,6 +110,7 @@ __all__ = [
     "max",
     "mean",
     "median",
+    "merge_comoment",
     "merge_histogram",
     "merge_lists",
     "merge_m2",
@@ -700,6 +704,36 @@ cpdef Aggregation merge_m2():
     """
     return Aggregation.from_libcudf(
         move(make_merge_m2_aggregation[aggregation]())
+    )
+
+
+cpdef Aggregation comoment():
+    """Create a comoment aggregation.
+
+    For details, see :cpp:func:`make_comoment_aggregation`.
+
+    Returns
+    -------
+    Aggregation
+        The comoment aggregation.
+    """
+    return Aggregation.from_libcudf(
+        move(make_comoment_aggregation[aggregation]())
+    )
+
+
+cpdef Aggregation merge_comoment():
+    """Create a merge comoment aggregation.
+
+    For details, see :cpp:func:`make_merge_comoment_aggregation`.
+
+    Returns
+    -------
+    Aggregation
+        The merge comoment aggregation.
+    """
+    return Aggregation.from_libcudf(
+        move(make_merge_comoment_aggregation[aggregation]())
     )
 
 

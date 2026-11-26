@@ -500,6 +500,26 @@ template CUDF_EXPORT std::unique_ptr<aggregation> make_correlation_aggregation<a
 template CUDF_EXPORT std::unique_ptr<groupby_aggregation>
 make_correlation_aggregation<groupby_aggregation>(correlation_type type, size_type min_periods);
 
+/// Factory to create a COMOMENT aggregation
+template <typename Base>
+std::unique_ptr<Base> make_comoment_aggregation()
+{
+  return std::make_unique<detail::comoment_aggregation>();
+}
+template CUDF_EXPORT std::unique_ptr<aggregation> make_comoment_aggregation<aggregation>();
+template CUDF_EXPORT std::unique_ptr<groupby_aggregation>
+make_comoment_aggregation<groupby_aggregation>();
+
+/// Factory to create a MERGE_COMOMENT aggregation
+template <typename Base>
+std::unique_ptr<Base> make_merge_comoment_aggregation()
+{
+  return std::make_unique<detail::merge_comoment_aggregation>();
+}
+template CUDF_EXPORT std::unique_ptr<aggregation> make_merge_comoment_aggregation<aggregation>();
+template CUDF_EXPORT std::unique_ptr<groupby_aggregation>
+make_merge_comoment_aggregation<groupby_aggregation>();
+
 template <typename Base>
 std::unique_ptr<Base> make_tdigest_aggregation(int max_centroids)
 {

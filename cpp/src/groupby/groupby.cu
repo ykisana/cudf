@@ -104,6 +104,47 @@ struct empty_column_constructor {
                                  mr);
     }
 
+    if constexpr (k == aggregation::Kind::COMOMENT) {
+      CUDF_EXPECTS(values.num_children() == 2,
+                   "Input to `COMOMENT` must be a structs column having 2 children columns.");
+      auto const is_supported_child = [](column_view const& c) {
+        if (cudf::is_dictionary(c.type())) {
+          return c.num_children() == 0 || cudf::is_numeric(dictionary_column_view(c).keys().type());
+        }
+        return cudf::is_numeric(c.type());
+      };
+      CUDF_EXPECTS(is_supported_child(values.child(0)) && is_supported_child(values.child(1)),
+                   "Input to `COMOMENT` must have numeric child columns.");
+      auto const output_mr = mr.get_output_mr();
+      std::vector<std::unique_ptr<cudf::column>> children;
+      children.reserve(6);
+      children.push_back(make_empty_column(cudf::type_id::INT64));
+      for (int i = 0; i < 5; ++i) {
+        children.push_back(make_empty_column(cudf::type_id::FLOAT64));
+      }
+      return make_structs_column(
+        0,
+        std::move(children),
+        0,
+        cudf::create_null_mask(0, cudf::mask_state::UNALLOCATED, stream, output_mr),
+        stream,
+        output_mr);
+    }
+
+    if constexpr (k == aggregation::Kind::MERGE_COMOMENT) {
+      CUDF_EXPECTS(values.num_children() == 6,
+                   "Input to `MERGE_COMOMENT` must be a structs column having 6 children columns.");
+      auto const count_type_id = values.child(0).type().id();
+      CUDF_EXPECTS((count_type_id == type_id::INT64 || count_type_id == type_id::FLOAT64) &&
+                     values.child(1).type().id() == type_id::FLOAT64 &&
+                     values.child(2).type().id() == type_id::FLOAT64 &&
+                     values.child(3).type().id() == type_id::FLOAT64 &&
+                     values.child(4).type().id() == type_id::FLOAT64 &&
+                     values.child(5).type().id() == type_id::FLOAT64,
+                   "Input to `MERGE_COMOMENT` has invalid children types.");
+      return empty_like(values);
+    }
+
     if constexpr (k == aggregation::Kind::RANK) {
       auto const& rank_agg = dynamic_cast<cudf::detail::rank_aggregation const&>(agg);
       if (rank_agg._method == cudf::rank_method::AVERAGE or
